@@ -20,7 +20,8 @@ class Sounds(QObject):
     def __init__(self, audio_on=True, *args, **kwargs):
         super(Sounds, self).__init__(*args, **kwargs)
         self.audio_on = audio_on
-        # self.pop = GameSound("./wav//pop.wav", self)
+        self.tick = GameSound("./wav//tick.wav", self)
+        self.line_cleared = GameSound("./wav//line_cleared.wav", self)
 
     def play(self):
         if self.parent.audio_on:

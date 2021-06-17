@@ -23,12 +23,40 @@ class FieldItem(QPushButton):
     changed = pyqtSignal(QObject)
     rightButtonPressed = pyqtSignal()
 
+    @property
+    def active_state(self):
+        return self._active_state
+
+    @active_state.setter
+    def active_state(self, toggled: bool):
+        self._active_state = toggled
+        if toggled:
+            print("Active state")
+            self._active_state_timer.start(500)
+        else:
+            print("Inactive state")
+            self._active_state_timer.stop()
+            if self.active_sprite_num:
+                self._active_state_timer.singleShot(500, self.change_active_sprite)
+
+    def change_active_sprite(self):
+        if not self.active_sprite_num:
+            self.parent().sounds.tick.play()
+        self.active_sprite_num = not self.active_sprite_num
+        self.update()
+        print(self, self.active_sprite_num)
+
     def __init__(self, y, x, *args, **kwargs):
         super(FieldItem, self).__init__(*args, **kwargs)
         self.y = y
         self.x = x
         self.not_empty = False
-        self.active_state = False
+
+        self._active_state = False
+        self._active_state_timer = QTimer(self)
+        self.active_sprite_num = 0
+        self._active_state_timer.timeout.connect(self.change_active_sprite)
+
         self.color = None
 
         self.current_image = self.parent().images.empty
@@ -55,7 +83,7 @@ class FieldItem(QPushButton):
         self.not_empty = True
         self.update()
 
-    def calculate_line(self):
+    def calculate_line(self) -> bool:
 
         # [x.value for x in CoordinatesMoves]
         moves = CoordinatesMoves
@@ -88,27 +116,29 @@ class FieldItem(QPushButton):
                     else:
                         break
 
-            if line_elements_count >= 5:
+            if line_elements_count >= self.parent().ITEMS_IN_LINE:
                 # print(f"There is a line {line_elements}")
                 for line_element in line_elements:
                     line_element.reset()
-                return
+
+                self.parent().sounds.line_cleared.play()
+                return True
+        return False
 
     def paintEvent(self, e: QPaintEvent):
         super().paintEvent(e)
         painter = QPainter(self)
 
+        if self.active_state:
+            # painter.fillRect(self.rect(), QColor("#f5f2eb"))
+            painter.fillRect(self.rect(), QColor("#f0f0f0"))
+            pass
 
         painter.drawImage(
-            self.rect().marginsAdded(QMargins() - 5),
+            self.rect().marginsAdded(QMargins() - (5 + int(self.active_sprite_num) * 2)),
             self.current_image
         )
-        if self.active_state:
-            # brush = QBrush()
-            pen = QPen()
-            pen.setColor(QColor("#f5f2eb"))
-            painter.setPen(pen)
-            painter.drawRect(self.rect())
+
         painter.end()
 
     def sizeHint(self):
@@ -142,39 +172,8 @@ class GameField(QWidget):
     game_reset = pyqtSignal()
     game_status_changed = pyqtSignal(GameStatus)
 
-    def resizeEvent(self, e: QResizeEvent):
-        w, h = e.size().width(), e.size().height()
-        wh = min(w, h)
-        new_size = QSize(wh, wh)
-        e.accept()
-        self.resize(new_size)
-
-    @property
-    def empty_items_count(self) -> int:
-        count = sum([not i.not_empty for i in self.fieldItems])
-        # print(count)
-        return count
-
-    def spawn_items(self, n: int = 5):
-        empty_items_count = self.empty_items_count
-        if self.empty_items_count == 0:
-            print("No more room to spawn!")
-            return
-        elif n > empty_items_count > 0:
-            n = empty_items_count
-
-        positions = []
-        while len(positions) < n:
-            pos = choice(self.fieldItems)
-            if not pos.not_empty:
-                positions += [pos]
-
-        for item in positions:
-            item.spawn_item()
-
-        if self.empty_items_count == 0:
-            self.loose()
-
+    ITEMS_IN_LINE = 5
+    SPAWN_PER_TURN = 3
     def __init__(self, width=10, height=10, *args, **kwargs):
         super(GameField, self).__init__(*args, **kwargs)
 
@@ -185,7 +184,6 @@ class GameField(QWidget):
         self.height = height
         self.ready_to_move_item = False
         self.item_to_move = None
-
 
         self.fieldItems2D = []
 
@@ -205,8 +203,41 @@ class GameField(QWidget):
 
         self.game_ended.connect(self.stop_game)
 
+    def resizeEvent(self, e: QResizeEvent):
+        w, h = e.size().width(), e.size().height()
+        wh = min(w, h)
+        new_size = QSize(wh, wh)
+        e.accept()
+        self.resize(new_size)
+
+    @property
+    def empty_items_count(self) -> int:
+        count = sum([not i.not_empty for i in self.fieldItems])
+        return count
+
+    def spawn_items(self, n: int = 0):
+        if n == 0:
+            n = srlf.SPAWN_PER_TURN
+        empty_items_count = self.empty_items_count
+        if self.empty_items_count == 0:
+            print("No more room to spawn!")
+            return
+        elif n > empty_items_count > 0:
+            n = empty_items_count
+
+        positions = []
+        while len(positions) < n:
+            pos = choice(self.fieldItems)
+            if not pos.not_empty:
+                positions += [pos]
+
+        for item in positions:
+            item.spawn_item()
+
+        if self.empty_items_count == 0:
+            self.loose()
+
     def item_clicked(self, item: FieldItem):
-        # print(item)
         if item.not_empty and not self.ready_to_move_item:
             print("Move it now")
             item.active_state = True
@@ -216,7 +247,9 @@ class GameField(QWidget):
 
         elif self.ready_to_move_item:
             self.swap_items(self.item_to_move, item)
-            self.spawn_items(5)
+
+            if not item.calculate_line():
+                self.spawn_items(self.SPAWN_PER_TURN)
 
     # if self.game_run:
     #     if item.status != FieldItemState.EMPTY:
@@ -255,17 +288,17 @@ class GameField(QWidget):
     #     self.start_game()
     #     self.item_clicked(item)
 
-    def swap_items(self, item_from:FieldItem, item_to:FieldItem):
+    def swap_items(self, item_from: FieldItem, item_to: FieldItem):
         if item_to.not_empty:
             print(f"{item_to} must be empty")
-            raise ValueError(f"{item_to} must be empty")
+            # raise ValueError(f"{item_to} must be empty")
+            return
 
         item_to.spawn_item(item_from.color)
         item_from.reset()
         item_from.update()
-        item_to.calculate_line()
         self.ready_to_move_item = False
-        self.update()
+        # self.update()
 
     def win(self):
         self.game_status = GameStatus.WON
