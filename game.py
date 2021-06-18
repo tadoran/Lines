@@ -1,6 +1,6 @@
 import sys
-from itertools import chain, dropwhile, repeat
-from random import randint, choice
+from itertools import chain
+from random import choice
 
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
@@ -10,9 +10,10 @@ from enums import GameStatus, GameDifficulty, CoordinatesMoves
 from resources import Images, Sounds
 
 from about import Ui_Dialog
+from copy import deepcopy
+from lines.path_explorer import GamePathExplorer
 
 
-# TODO
 class AboutDialog(QDialog, Ui_Dialog):
     def __init__(self, *args, **kwargs):
         super(AboutDialog, self).__init__(*args, **kwargs)
@@ -30,11 +31,12 @@ class FieldItem(QPushButton):
     @active_state.setter
     def active_state(self, toggled: bool):
         self._active_state = toggled
+        self.changed.emit(self)
         if toggled:
-            print("Active state")
-            self._active_state_timer.start(500)
+            # print("Active state")
+            self._active_state_timer.start(200)
         else:
-            print("Inactive state")
+            # print("Inactive state")
             self._active_state_timer.stop()
             if self.active_sprite_num:
                 self._active_state_timer.singleShot(500, self.change_active_sprite)
@@ -44,7 +46,7 @@ class FieldItem(QPushButton):
             self.parent().sounds.tick.play()
         self.active_sprite_num = not self.active_sprite_num
         self.update()
-        print(self, self.active_sprite_num)
+        # print(self, self.active_sprite_num)
 
     def __init__(self, y, x, *args, **kwargs):
         super(FieldItem, self).__init__(*args, **kwargs)
@@ -81,6 +83,7 @@ class FieldItem(QPushButton):
 
         # print(color)
         self.not_empty = True
+        self.changed.emit(self)
         self.update()
 
     def calculate_line(self) -> bool:
@@ -171,9 +174,16 @@ class GameField(QWidget):
     game_ended = pyqtSignal()
     game_reset = pyqtSignal()
     game_status_changed = pyqtSignal(GameStatus)
+    item_changed = pyqtSignal(QObject)
 
     ITEMS_IN_LINE = 5
     SPAWN_PER_TURN = 3
+
+    @pyqtSlot(QObject)
+    def item_changed_slot(self, item):
+        # print("item_changed", item)
+        self.item_changed.emit(item)
+
     def __init__(self, width=10, height=10, *args, **kwargs):
         super(GameField, self).__init__(*args, **kwargs)
 
@@ -195,6 +205,7 @@ class GameField(QWidget):
             self.fieldItems2D.append([])
             for x in range(width):
                 item = FieldItem(y, x, parent=self)
+                item.changed.connect(self.item_changed_slot)
                 self.fieldItems2D[y].append(item)
                 layout.addWidget(item, y, x)
 
@@ -244,12 +255,72 @@ class GameField(QWidget):
             self.ready_to_move_item = True
             self.item_to_move = item
             item.update()
+        elif self.ready_to_move_item and item.not_empty:
+            self.item_to_move.active_state = False
+            self.item_to_move.update()
+
+            item.active_state = True
+            self.ready_to_move_item = True
+            self.item_to_move = item
 
         elif self.ready_to_move_item:
             self.swap_items(self.item_to_move, item)
 
             if not item.calculate_line():
                 self.spawn_items(self.SPAWN_PER_TURN)
+
+    def find_paths(self, start: QObject, end: QObject = None):
+        field_map = [[i.not_empty for i in row] for row in self.fieldItems2D]
+
+        moves = CoordinatesMoves
+        possible_moves = [moves.RIGHT, moves.DOWN, moves.LEFT, moves.UP]
+        directions = [QPoint(*m.value) for m in possible_moves]
+        field_rect = QRect(0, 0, self.width, self.height)
+
+        start_point = QPoint(start.x, start.y)
+        if end:
+            end_point = QPoint(end.x, end.y)
+        else:
+            end_point = QPoint()
+
+        paths = [[start_point]]
+        visited_points = set()
+        path_found = False
+        found_path = []
+
+        while not path_found or len(last_paths) > 0:
+            paths.sort(key=lambda x, end=end_point: (x[-1] - end).manhattanLength())
+            last_paths = []
+            for path in paths:
+                last_point = path[-1]
+                for d in directions:
+                    next_point = last_point + d
+                    if (field_rect.contains(next_point) and
+                            not field_map[next_point.y()][next_point.x()] and
+                            not str(next_point) in visited_points
+                    ):
+                        visited_points.add(str(next_point))
+                        new_path = deepcopy(path + [next_point])
+                        self.found_path = new_path
+                        last_paths.append(new_path)
+                        if next_point == end_point:
+                            path_found = True
+                            found_path = new_path
+                            break
+                    elif next_point == end_point:
+                        path_found = True
+                        found_path = path
+                        break
+            else:
+                paths = last_paths
+
+            if len(paths) == 0 and not path_found:
+                found_path = []
+                break
+            else:
+                found_path = found_path + [end_point]
+        return found_path
+
 
     # if self.game_run:
     #     if item.status != FieldItemState.EMPTY:
@@ -527,5 +598,8 @@ class MainWindow(QMainWindow):
 
 app = QApplication(sys.argv)
 window = MainWindow()
+explorer = GamePathExplorer(window)
+
+explorer.show()
 
 app.exec_()
