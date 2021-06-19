@@ -72,7 +72,6 @@ class FieldItem(QPushButton):
 
         self.pressed.connect(lambda item=self: item.parent().item_clicked(item))
         self.rightButtonPressed.connect(self.calculate_line)
-        # self.parent().items_block_released.connect(self.release_block)
 
     def spawn_item(self, color: str = None):
         if not color:
@@ -125,6 +124,7 @@ class FieldItem(QPushButton):
                     line_element.reset()
 
                 self.parent().sounds.line_cleared.play()
+                self.parent().scores += 5 * line_elements_count
                 return True
         return False
 
@@ -175,6 +175,7 @@ class GameField(QWidget):
     game_reset = pyqtSignal()
     game_status_changed = pyqtSignal(GameStatus)
     item_changed = pyqtSignal(QObject)
+    scores_updated = pyqtSignal(int)
 
     ITEMS_IN_LINE = 5
     SPAWN_PER_TURN = 3
@@ -192,6 +193,10 @@ class GameField(QWidget):
 
         self.width = width
         self.height = height
+
+        self._scores = 0
+        self.next_spawn = []
+
         self.ready_to_move_item = False
         self.item_to_move = None
 
@@ -213,6 +218,15 @@ class GameField(QWidget):
         # list(map(FieldItem.find_neighbours, self.fieldItems))
 
         self.game_ended.connect(self.stop_game)
+
+    @property
+    def scores(self):
+        return self._scores
+
+    @scores.setter
+    def scores(self, count: int):
+        self._scores = count
+        self.scores_updated.emit(count)
 
     def resizeEvent(self, e: QResizeEvent):
         w, h = e.size().width(), e.size().height()
@@ -264,10 +278,54 @@ class GameField(QWidget):
             self.item_to_move = item
 
         elif self.ready_to_move_item:
-            self.swap_items(self.item_to_move, item)
+            path_to_take = self.find_paths(self.item_to_move, item)
+            if len(path_to_take) > 0:
+                # self.swap_items(self.item_to_move, item)
 
+                timer = QTimer(self)
+                self.move_timer = timer
+                self.path_to_take = path_to_take
+                self.move_timer_ticks_count = 0
+
+                timer.setInterval(25)
+                timer.timeout.connect(self.move_item_by_steps)
+                timer.start()
+
+                # current_item = self.item_to_move
+                # for i, next_point in enumerate(path_to_take[1:]):
+                #     next_item = self.fieldItems2D[next_point.y()][next_point.x()]
+                #     timer.singleShot(25 * (i + 1), lambda c=current_item, n=next_item, self=self: self.swap_items(c, n))
+                #     current_item = next_item
+                #
+                # if not item.calculate_line():
+                #     timer.singleShot(25 * (i + 1), lambda self=self: self.spawn_items(self.SPAWN_PER_TURN))
+
+    def move_item_by_steps(self):
+        timer = self.move_timer
+        self.move_timer_ticks_count += 1
+        if self.move_timer_ticks_count > len(self.path_to_take):
+            item_point = self.path_to_take[-1]
+            item = self.fieldItems2D[item_point.y()][item_point.x()]
             if not item.calculate_line():
-                self.spawn_items(self.SPAWN_PER_TURN)
+                self.spawn_items()
+
+            timer.stop()
+            self.item_to_move = None
+            self.path_to_take = None
+            self.move_timer_ticks_count = 0
+            return
+
+        if self.move_timer_ticks_count == 1:
+            current_point = self.path_to_take[0]
+            next_point = self.path_to_take[1]
+        else:
+            current_point = self.path_to_take[self.move_timer_ticks_count - 2]
+            next_point = self.path_to_take[self.move_timer_ticks_count - 1]
+
+        current_item = self.fieldItems2D[current_point.y()][current_point.x()]
+        next_item = self.fieldItems2D[next_point.y()][next_point.x()]
+        transit = self.move_timer_ticks_count == len(self.path_to_take)
+        self.swap_items(current_item, next_item, transit=transit)
 
     def find_paths(self, start: QObject, end: QObject = None):
         field_map = [[i.not_empty for i in row] for row in self.fieldItems2D]
@@ -284,13 +342,15 @@ class GameField(QWidget):
             end_point = QPoint()
 
         paths = [[start_point]]
+        last_paths = paths
         visited_points = set()
         path_found = False
         found_path = []
 
-        while not path_found or len(last_paths) > 0:
-            paths.sort(key=lambda x, end=end_point: (x[-1] - end).manhattanLength())
+        while not path_found and len(last_paths) > 0:
+            paths.sort(key=lambda x, end=end_point: (x[-1] - end).manhattanLength(), reverse=True)
             last_paths = []
+            last_point = None
             for path in paths:
                 last_point = path[-1]
                 for d in directions:
@@ -301,26 +361,24 @@ class GameField(QWidget):
                     ):
                         visited_points.add(str(next_point))
                         new_path = deepcopy(path + [next_point])
-                        self.found_path = new_path
                         last_paths.append(new_path)
                         if next_point == end_point:
-                            path_found = True
-                            found_path = new_path
-                            break
-                    elif next_point == end_point:
-                        path_found = True
-                        found_path = path
-                        break
+                            return new_path
+                    # elif next_point == end_point:
+                    #     path_found = True
+                    #     found_path = path
+                    #     break
             else:
                 paths = last_paths
+                pass
 
-            if len(paths) == 0 and not path_found:
-                found_path = []
+            if len(last_paths) == 0 and not path_found:
+                last_paths = []
                 break
-            else:
-                found_path = found_path + [end_point]
+        # else:
+        #     found_path = found_path
+        #     break
         return found_path
-
 
     # if self.game_run:
     #     if item.status != FieldItemState.EMPTY:
@@ -369,7 +427,7 @@ class GameField(QWidget):
         item_from.reset()
         item_from.update()
         self.ready_to_move_item = False
-        # self.update()
+        self.update()
 
     def win(self):
         self.game_status = GameStatus.WON
@@ -406,6 +464,7 @@ class GameField(QWidget):
         self.game_status = GameStatus.RUNNING
         list(map(FieldItem.reset, self.fieldItems))
         self.game_status_changed.emit(self.game_status)
+        self.scores = 0
         self.game_reset.emit()
         self.ready_to_move_item = False
         self.item_to_move = None
@@ -421,58 +480,12 @@ class StatusBar(QWidget):
         layout = QHBoxLayout()
         self.setLayout(layout)
 
-        self.mines_counter = QLCDNumber(self)
-        self.mines_counter.setFrameShape(QFrame.NoFrame)
-        layout.addWidget(self.mines_counter, alignment=Qt.AlignLeft)
-
-        self.img = QLabel(self)
-        self.pixmaps = {"smile": QPixmap().fromImage(self.images.smile, Qt.AutoColor),
-                        "dead": QPixmap().fromImage(self.images.dead, Qt.AutoColor),
-                        "won": QPixmap().fromImage(self.images.win_smile, Qt.AutoColor)}
-        self.set_smile(GameStatus.RUNNING)
-
-        self.img.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.img)
-
-        self.timer_counter = QLCDNumber(self)
-        self.timer_counter.setFrameShape(QFrame.NoFrame)
-        layout.addWidget(self.timer_counter, alignment=Qt.AlignRight)
-        self.timer = QTimer(self)
-
-    def set_smile(self, game_status: GameStatus):
-        if game_status == GameStatus.RUNNING:
-            self.img.setPixmap(self.pixmaps["smile"])
-        elif game_status == GameStatus.WON:
-            self.img.setPixmap(self.pixmaps["won"])
-        elif game_status == GameStatus.LOST:
-            self.img.setPixmap(self.pixmaps["dead"])
-        self.img.update()
-
-    def start_timer(self):
-        self.end_timer()
-        self.timer = QTimer(self)
-        self.timer_counter.display(0)
-        self.timer.setInterval(1000)
-        self.timer.timeout.connect(lambda x=self.timer_counter: x.display(x.value() + 1))
-        self.timer.start()
-
-    def end_timer(self):
-        try:
-            self.timer.stop()
-            self.timer.disconnect()
-            del self.timer
-        except Exception:
-            pass
+        self.scores_counter = QLCDNumber(self)
+        self.scores_counter.setFrameShape(QFrame.NoFrame)
+        layout.addWidget(self.scores_counter, alignment=Qt.AlignLeft)
 
     def update_counter(self, value):
-        self.mines_counter.display(value)
-
-    def reset(self):
-        self.timer_counter.display(0)
-        self.mines_counter.display(0)
-
-    # def sizeHint(self):
-    #     return QSize(40, 60)
+        self.scores_counter.display(value)
 
 
 # TODO
@@ -567,18 +580,14 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout(self.mainWidget)
         self.mainWidget.setLayout(layout)
-        # self.status_bar = StatusBar(self)
-        # layout.addWidget(self.status_bar)
+
+        self.status_bar = StatusBar(self)
+        layout.addWidget(self.status_bar)
+        self.game_field.scores_updated.connect(self.status_bar.update_counter)
 
         # self.game_actions.bind()
 
         layout.addWidget(self.game_field)
-
-        # self.game_field.mines_count_changed.connect(self.status_bar.mines_counter.display)
-        # self.game_field.game_started.connect(self.status_bar.start_timer)
-        # self.game_field.game_ended.connect(self.status_bar.end_timer)
-        # self.game_field.game_reset.connect(self.status_bar.reset)
-        # self.game_field.game_status_changed.connect(self.status_bar.set_smile)
 
         self.setCentralWidget(self.mainWidget)
         self.mainWidget.resize = self.game_field.resize

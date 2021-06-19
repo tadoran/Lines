@@ -27,7 +27,7 @@ class GamePathExplorer(QMainWindow):
         return QSize(self.block_size * self.pts_w, self.block_size * self.pts_w)
 
     def update_map(self, item):
-        print("Update!", item)
+        # print("Update!", item)
         if item.active_state:
             self.found_path = item.parent().find_paths(item,
                                               self.monitoredWidget.game_field.fieldItems2D[randint(0, self.pts_h - 1)][
