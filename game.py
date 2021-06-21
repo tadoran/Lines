@@ -1,16 +1,15 @@
 import sys
+from copy import deepcopy
 from itertools import chain
 from random import choice
 
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
-
+from about import Ui_Dialog
 from enums import GameStatus, GameDifficulty, CoordinatesMoves
 from resources import Images, Sounds
 
-from about import Ui_Dialog
-from copy import deepcopy
 from lines.path_explorer import GamePathExplorer
 
 
@@ -59,14 +58,16 @@ class FieldItem(QPushButton):
         self.active_sprite_num = 0
         self._active_state_timer.timeout.connect(self.change_active_sprite)
 
+        self.next_color = None
         self.color = None
+        self.brief_override = None
 
         self.current_image = self.parent().images.empty
 
-        sizePolicy = QSizePolicy.Expanding
+        size_policy = QSizePolicy.Expanding
         policy = QSizePolicy()
-        policy.setHorizontalPolicy(sizePolicy)
-        policy.setVerticalPolicy(sizePolicy)
+        policy.setHorizontalPolicy(size_policy)
+        policy.setVerticalPolicy(size_policy)
         policy.setWidthForHeight(True)
         self.setSizePolicy(policy)
 
@@ -75,12 +76,14 @@ class FieldItem(QPushButton):
 
     def spawn_item(self, color: str = None):
         if not color:
-            color = choice(list(self.parent().images.colors))
+            if self.next_color:
+                self.color = self.next_color
+            else:
+                self.color = choice(list(self.parent().images.colors))
+        else:
+            self.color = color
 
-        self.color = color
-        self.current_image = self.parent().images.colors[color]
-
-        # print(color)
+        self.current_image = self.parent().images.colors[self.color]
         self.not_empty = True
         self.changed.emit(self)
         self.update()
@@ -128,19 +131,40 @@ class FieldItem(QPushButton):
                 return True
         return False
 
+    def show_briefly(self, img: QImage):
+        self.brief_override = img
+
+    def cancel_override(self):
+        self.brief_override = None
+
     def paintEvent(self, e: QPaintEvent):
         super().paintEvent(e)
         painter = QPainter(self)
+        if self.brief_override:
+            painter.drawImage(
+                self.rect().marginsAdded(QMargins() - 5),
+                self.brief_override
+            )
+            painter.end()
+            return
 
         if self.active_state:
             # painter.fillRect(self.rect(), QColor("#f5f2eb"))
             painter.fillRect(self.rect(), QColor("#f0f0f0"))
             pass
 
-        painter.drawImage(
-            self.rect().marginsAdded(QMargins() - (5 + int(self.active_sprite_num) * 2)),
-            self.current_image
-        )
+        if self.parent().SHOW_NEXT_SPAWN:
+            if self.next_color and not self.color:
+                painter.drawImage(
+                    self.rect().marginsAdded(QMargins() - 25),
+                    self.parent().images.colors[self.next_color]
+                )
+
+        if self.color:
+            painter.drawImage(
+                self.rect().marginsAdded(QMargins() - (5 + int(self.active_sprite_num) * 2)),
+                self.current_image
+            )
 
         painter.end()
 
@@ -158,6 +182,8 @@ class FieldItem(QPushButton):
         self.not_empty = False
         self.active_state = False
         self.color = None
+        self.brief_override = None
+
         self.update()
 
     def mousePressEvent(self, e: QMouseEvent):
@@ -179,6 +205,7 @@ class GameField(QWidget):
 
     ITEMS_IN_LINE = 5
     SPAWN_PER_TURN = 3
+    SHOW_NEXT_SPAWN = True
 
     @pyqtSlot(QObject)
     def item_changed_slot(self, item):
@@ -215,8 +242,7 @@ class GameField(QWidget):
                 layout.addWidget(item, y, x)
 
         self.fieldItems = list(chain.from_iterable(self.fieldItems2D))
-        # list(map(FieldItem.find_neighbours, self.fieldItems))
-
+        self.prepare_next_spawn(self.SPAWN_PER_TURN)
         self.game_ended.connect(self.stop_game)
 
     @property
@@ -240,7 +266,16 @@ class GameField(QWidget):
         count = sum([not i.not_empty for i in self.fieldItems])
         return count
 
-    def spawn_items(self, n: int = 0):
+    def spawn_items(self):
+        if len(self.next_spawn) < self.SPAWN_PER_TURN:
+            self.prepare_next_spawn(self.SPAWN_PER_TURN - len(self.next_spawn))
+
+        for item in self.next_spawn:
+            item.spawn_item()
+        self.next_spawn = []
+        self.prepare_next_spawn(self.SPAWN_PER_TURN)
+
+    def prepare_next_spawn(self, n: int = 0):
         if n == 0:
             n = srlf.SPAWN_PER_TURN
         empty_items_count = self.empty_items_count
@@ -255,11 +290,13 @@ class GameField(QWidget):
             pos = choice(self.fieldItems)
             if not pos.not_empty:
                 positions += [pos]
+                pos.next_color = choice(list(self.images.colors))
+                if self.SHOW_NEXT_SPAWN:
+                    pos.update()
 
-        for item in positions:
-            item.spawn_item()
+        self.next_spawn = positions
 
-        if self.empty_items_count == 0:
+        if self.empty_items_count <= len(positions):
             self.loose()
 
     def item_clicked(self, item: FieldItem):
@@ -269,7 +306,7 @@ class GameField(QWidget):
             self.ready_to_move_item = True
             self.item_to_move = item
             item.update()
-        elif self.ready_to_move_item and item.not_empty:
+        elif self.ready_to_move_item and item.not_empty and self.item_to_move is not None:
             self.item_to_move.active_state = False
             self.item_to_move.update()
 
@@ -280,27 +317,75 @@ class GameField(QWidget):
         elif self.ready_to_move_item:
             path_to_take = self.find_paths(self.item_to_move, item)
             if len(path_to_take) > 0:
-                # self.swap_items(self.item_to_move, item)
-
                 timer = QTimer(self)
                 self.move_timer = timer
                 self.path_to_take = path_to_take
-                self.move_timer_ticks_count = 0
+                self.move_timer_ticks_count = -1
 
                 timer.setInterval(25)
                 timer.timeout.connect(self.move_item_by_steps)
                 timer.start()
 
-                # current_item = self.item_to_move
-                # for i, next_point in enumerate(path_to_take[1:]):
-                #     next_item = self.fieldItems2D[next_point.y()][next_point.x()]
-                #     timer.singleShot(25 * (i + 1), lambda c=current_item, n=next_item, self=self: self.swap_items(c, n))
-                #     current_item = next_item
-                #
-                # if not item.calculate_line():
-                #     timer.singleShot(25 * (i + 1), lambda self=self: self.spawn_items(self.SPAWN_PER_TURN))
-
     def move_item_by_steps(self):
+        timer = self.move_timer
+        self.move_timer_ticks_count += 1
+
+        start_item_point = self.path_to_take[0]
+        start_item = self.fieldItems2D[start_item_point.y()][start_item_point.x()]
+
+        end_item_point = self.path_to_take[-1]
+        end_item = self.fieldItems2D[end_item_point.y()][end_item_point.x()]
+
+        # first iteration
+        if self.move_timer_ticks_count == 0:
+            current_point = self.path_to_take[0]
+            next_point = self.path_to_take[1]
+        # Normal transit move
+        elif self.move_timer_ticks_count < len(self.path_to_take) - 1:
+            current_point = self.path_to_take[self.move_timer_ticks_count]
+            next_point = self.path_to_take[self.move_timer_ticks_count + 1]
+
+        # Final step
+        else:
+            end_item.cancel_override()
+            self.swap_items(start_item, end_item)
+            start_item.reset()
+
+            if not end_item.calculate_line():
+                self.spawn_items()
+
+            timer.stop()
+            self.ready_to_move_item = False
+            self.item_to_move = None
+            self.path_to_take = None
+            self.move_timer_ticks_count = 0
+            return
+
+        current_item = self.fieldItems2D[current_point.y()][current_point.x()]
+        next_item = self.fieldItems2D[next_point.y()][next_point.x()]
+        next_item.show_briefly(self.images.colors[start_item.color])
+        if self.move_timer_ticks_count > 0:
+            current_item.cancel_override()
+            current_item.reset()
+        current_item.update()
+        next_item.update()
+        pass
+        # current_point = self.path_to_take[self.move_timer_ticks_count - 1]
+        # next_point = self.path_to_take[self.move_timer_ticks_count]
+        #
+        # current_item = self.fieldItems2D[current_point.y()][current_point.x()]
+        # next_item = self.fieldItems2D[next_point.y()][next_point.x()]
+        #
+        # next_item.show_briefly(self.images.colors[start_item.color])
+        # if self.move_timer_ticks_count > 0:
+        #     current_item.cancel_override()
+        #     current_item.reset()
+        # current_item.update()
+        # next_item.update()
+
+        # self.move_timer_ticks_count += 1
+
+    def move_item_by_steps_o(self):
         timer = self.move_timer
         self.move_timer_ticks_count += 1
         if self.move_timer_ticks_count > len(self.path_to_take):
@@ -324,8 +409,7 @@ class GameField(QWidget):
 
         current_item = self.fieldItems2D[current_point.y()][current_point.x()]
         next_item = self.fieldItems2D[next_point.y()][next_point.x()]
-        transit = self.move_timer_ticks_count == len(self.path_to_take)
-        self.swap_items(current_item, next_item, transit=transit)
+        self.swap_items(current_item, next_item)
 
     def find_paths(self, start: QObject, end: QObject = None):
         field_map = [[i.not_empty for i in row] for row in self.fieldItems2D]
@@ -350,7 +434,6 @@ class GameField(QWidget):
         while not path_found and len(last_paths) > 0:
             paths.sort(key=lambda x, end=end_point: (x[-1] - end).manhattanLength(), reverse=True)
             last_paths = []
-            last_point = None
             for path in paths:
                 last_point = path[-1]
                 for d in directions:
@@ -358,69 +441,24 @@ class GameField(QWidget):
                     if (field_rect.contains(next_point) and
                             not field_map[next_point.y()][next_point.x()] and
                             not str(next_point) in visited_points
-                    ):
+                        ):
+
                         visited_points.add(str(next_point))
                         new_path = deepcopy(path + [next_point])
                         last_paths.append(new_path)
                         if next_point == end_point:
                             return new_path
-                    # elif next_point == end_point:
-                    #     path_found = True
-                    #     found_path = path
-                    #     break
             else:
                 paths = last_paths
                 pass
 
             if len(last_paths) == 0 and not path_found:
-                last_paths = []
                 break
-        # else:
-        #     found_path = found_path
-        #     break
         return found_path
-
-    # if self.game_run:
-    #     if item.status != FieldItemState.EMPTY:
-    #         return
-    #     if item.has_mine and self.first_turn:
-    #         self.sounds.pop.play()
-    #         item.has_mine = False
-    #         found_new_mine_spot = False
-    #         while not found_new_mine_spot:
-    #             current_item = choice(self.fieldItems)
-    #             if not current_item.has_mine:
-    #                 # print(f"Ha-ha, found mine on first turn! Ok, that mine was moved to {current_item}")
-    #                 index = self.items_with_mines.index(item)
-    #                 self.items_with_mines[index] = current_item
-    #                 current_item.has_mine = True
-    #                 found_new_mine_spot = True
-    #         item.calculate()
-    #
-    #     elif item.has_mine:
-    #         item.was_fatal_item = True
-    #         self.sounds.blow.play()
-    #         item.update()
-    #         self.loose()
-    #     elif item.visible:
-    #         pass
-    #     else:
-    #         self.sounds.pop.play()
-    #         item.calculate()
-    #
-    #     item.update()
-    #     self.items_block_released.emit()
-    #     self.first_turn = False
-    #
-    # elif self.game_status == GameStatus.RUNNING:
-    #     self.first_turn = False
-    #     self.start_game()
-    #     self.item_clicked(item)
 
     def swap_items(self, item_from: FieldItem, item_to: FieldItem):
         if item_to.not_empty:
             print(f"{item_to} must be empty")
-            # raise ValueError(f"{item_to} must be empty")
             return
 
         item_to.spawn_item(item_from.color)
@@ -468,7 +506,7 @@ class GameField(QWidget):
         self.game_reset.emit()
         self.ready_to_move_item = False
         self.item_to_move = None
-        self.spawn_items(5)
+        self.spawn_items()
 
 
 # TODO
@@ -609,6 +647,6 @@ app = QApplication(sys.argv)
 window = MainWindow()
 explorer = GamePathExplorer(window)
 
-explorer.show()
+# explorer.show()
 
 app.exec_()
